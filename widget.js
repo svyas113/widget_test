@@ -1,8 +1,29 @@
 (function () {
-    // 1. Prevent multiple injections if the script is loaded twice
+    // ── 1. Prevent multiple injections ──────────────────────────────────────
     if (document.getElementById('chat-widget-launcher')) return;
 
-    // 2. Inject scoped CSS
+    // ── 2. Configuration ────────────────────────────────────────────────────
+    const API_BASE   = 'https://custivox-agent-512321808055.asia-south1.run.app';
+    // Unique channel per page-load session (persisted in sessionStorage so
+    // a page refresh starts fresh; change to localStorage if you want to
+    // resume across refreshes).
+    const CHANNEL_ID = (function () {
+        const key = 'chat_widget_channel_id';
+        let id = sessionStorage.getItem(key);
+        if (!id) {
+            id = 'widget-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
+            sessionStorage.setItem(key, id);
+        }
+        return id;
+    })();
+
+    // ── 3. Session state (all scoped, no globals) ────────────────────────────
+    let accessToken   = null;
+    let refreshToken  = null;
+    let isInitialized = false;
+    let isBusy        = false;   // blocks send while agent is processing
+
+    // ── 4. Inject scoped CSS ─────────────────────────────────────────────────
     const style = document.createElement('style');
     style.innerHTML = `
         /* ── Launcher Button ── */
@@ -134,12 +155,8 @@
             gap: 10px;
             background: #f9fafb;
         }
-        #chat-widget-messages::-webkit-scrollbar {
-            width: 4px;
-        }
-        #chat-widget-messages::-webkit-scrollbar-track {
-            background: transparent;
-        }
+        #chat-widget-messages::-webkit-scrollbar { width: 4px; }
+        #chat-widget-messages::-webkit-scrollbar-track { background: transparent; }
         #chat-widget-messages::-webkit-scrollbar-thumb {
             background: #d1d5db;
             border-radius: 4px;
@@ -151,9 +168,7 @@
             align-items: flex-end;
             gap: 8px;
         }
-        .chat-msg-row.user {
-            flex-direction: row-reverse;
-        }
+        .chat-msg-row.user { flex-direction: row-reverse; }
         .chat-bubble {
             max-width: 75%;
             padding: 10px 14px;
@@ -161,6 +176,7 @@
             font-size: 14px;
             line-height: 1.45;
             word-wrap: break-word;
+            white-space: pre-wrap;
         }
         .chat-msg-row.user .chat-bubble {
             background: #3b82f6;
@@ -173,6 +189,11 @@
             border-bottom-left-radius: 4px;
             box-shadow: 0 1px 4px rgba(0,0,0,0.08);
             border: 1px solid #e5e7eb;
+        }
+        .chat-msg-row.bot.chat-error .chat-bubble {
+            background: #fef2f2;
+            color: #b91c1c;
+            border-color: #fecaca;
         }
 
         /* ── Typing Indicator ── */
@@ -199,7 +220,7 @@
 
         /* ── Input Row ── */
         #chat-widget-input-row {
-            padding: 12px 12px;
+            padding: 12px;
             border-top: 1px solid #e5e7eb;
             display: flex;
             gap: 8px;
@@ -217,12 +238,8 @@
             transition: border-color 0.15s;
             color: #1f2937;
         }
-        #chat-widget-input:focus {
-            border-color: #3b82f6;
-        }
-        #chat-widget-input::placeholder {
-            color: #9ca3af;
-        }
+        #chat-widget-input:focus { border-color: #3b82f6; }
+        #chat-widget-input::placeholder { color: #9ca3af; }
         #chat-widget-send {
             width: 40px;
             height: 40px;
@@ -236,9 +253,7 @@
             transition: background 0.2s;
             flex-shrink: 0;
         }
-        #chat-widget-send:hover {
-            background: #2563eb;
-        }
+        #chat-widget-send:hover { background: #2563eb; }
         #chat-widget-send:disabled {
             background: #93c5fd;
             cursor: not-allowed;
@@ -251,11 +266,7 @@
     `;
     document.head.appendChild(style);
 
-    // 3. Generic bot response (swap this for a real API call later)
-    const GENERIC_RESPONSE =
-        "Hi there! Thanks for reaching out. Our agent has received your message and will respond shortly.";
-
-    // 4. Build the launcher button
+    // ── 5. Build launcher button ─────────────────────────────────────────────
     const launcher = document.createElement('button');
     launcher.id = 'chat-widget-launcher';
     launcher.setAttribute('aria-label', 'Open chat');
@@ -265,7 +276,7 @@
         </svg>`;
     document.body.appendChild(launcher);
 
-    // 5. Build the chat window
+    // ── 6. Build chat window ─────────────────────────────────────────────────
     const chatWindow = document.createElement('div');
     chatWindow.id = 'chat-widget-window';
     chatWindow.classList.add('chat-hidden');
@@ -306,21 +317,20 @@
     `;
     document.body.appendChild(chatWindow);
 
-    // 6. Grab references
-    const messagesEl  = chatWindow.querySelector('#chat-widget-messages');
-    const inputEl     = chatWindow.querySelector('#chat-widget-input');
-    const sendBtn     = chatWindow.querySelector('#chat-widget-send');
-    const closeBtn    = chatWindow.querySelector('#chat-widget-close');
+    // ── 7. Grab element references ───────────────────────────────────────────
+    const messagesEl = chatWindow.querySelector('#chat-widget-messages');
+    const inputEl    = chatWindow.querySelector('#chat-widget-input');
+    const sendBtn    = chatWindow.querySelector('#chat-widget-send');
+    const closeBtn   = chatWindow.querySelector('#chat-widget-close');
 
-    // 7. Helper — scroll messages to bottom
+    // ── 8. UI helpers ────────────────────────────────────────────────────────
     function scrollToBottom() {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
-    // 8. Helper — append a message bubble
-    function appendMessage(text, sender /* 'user' | 'bot' */) {
+    function appendMessage(text, sender /* 'user' | 'bot' */, isError) {
         const row = document.createElement('div');
-        row.className = 'chat-msg-row ' + sender;
+        row.className = 'chat-msg-row ' + sender + (isError ? ' chat-error' : '');
         const bubble = document.createElement('div');
         bubble.className = 'chat-bubble';
         bubble.textContent = text;
@@ -329,7 +339,6 @@
         scrollToBottom();
     }
 
-    // 9. Helper — show/hide typing indicator
     function showTyping() {
         const row = document.createElement('div');
         row.className = 'chat-msg-row bot';
@@ -340,32 +349,149 @@
         messagesEl.appendChild(row);
         scrollToBottom();
     }
+
     function hideTyping() {
         const el = document.getElementById('chat-widget-typing');
         if (el) el.remove();
     }
 
-    // 10. Send message logic
-    function sendMessage() {
-        const text = inputEl.value.trim();
-        if (!text) return;
-
-        // Show user message
-        appendMessage(text, 'user');
-        inputEl.value = '';
-        sendBtn.disabled = true;
-
-        // Show typing indicator then reply with generic response
-        showTyping();
-        setTimeout(function () {
-            hideTyping();
-            appendMessage(GENERIC_RESPONSE, 'bot');
-            sendBtn.disabled = false;
-            inputEl.focus();
-        }, 900);
+    function setBusy(busy) {
+        isBusy = busy;
+        sendBtn.disabled = busy;
+        inputEl.disabled = busy;
     }
 
-    // 11. Toggle open/close
+    // ── 9. API helpers ───────────────────────────────────────────────────────
+
+    /**
+     * POST /initialize — creates / resumes a session for this channel_id.
+     * Stores access_token and refresh_token in memory.
+     */
+    async function initSession() {
+        const res = await fetch(API_BASE + '/initialize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                channel_id: CHANNEL_ID,
+                stream_format: 'ndjson'
+            })
+        });
+        if (!res.ok) throw new Error('init_failed:' + res.status);
+        const data = await res.json();
+        accessToken  = data.access_token;
+        refreshToken = data.refresh_token;
+        isInitialized = true;
+    }
+
+    /**
+     * POST /refresh_token — silently refreshes a near-expired access token.
+     */
+    async function refreshAccessToken() {
+        const res = await fetch(API_BASE + '/refresh_token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + refreshToken
+            }
+        });
+        if (!res.ok) throw new Error('refresh_failed:' + res.status);
+        const data = await res.json();
+        accessToken  = data.access_token;
+        refreshToken = data.refresh_token;
+    }
+
+    /**
+     * POST /invoke_agent — sends the user query and returns the agent's text.
+     * Automatically retries once after refreshing the token on a 401.
+     */
+    async function callAgent(userQuery) {
+        async function doRequest() {
+            return fetch(API_BASE + '/invoke_agent', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + accessToken
+                },
+                body: JSON.stringify({
+                    user_query: userQuery,
+                    timeout_seconds: 60
+                })
+            });
+        }
+
+        let res = await doRequest();
+
+        // ── Token expired → refresh once and retry ──
+        if (res.status === 401) {
+            await refreshAccessToken();
+            res = await doRequest();
+        }
+
+        // ── Still failing after refresh ──
+        if (!res.ok) {
+            if (res.status === 409) {
+                throw new Error('busy');
+            } else if (res.status === 504) {
+                throw new Error('timeout');
+            } else {
+                throw new Error('agent_error:' + res.status);
+            }
+        }
+
+        const data = await res.json();
+
+        // Extract the agent's text from command_responses[0].response
+        if (
+            data.command_responses &&
+            data.command_responses.length > 0 &&
+            data.command_responses[0].response
+        ) {
+            return data.command_responses[0].response;
+        }
+
+        // Fallback if structure is unexpected
+        return 'I received your message but could not parse the response.';
+    }
+
+    // ── 10. Send message flow ────────────────────────────────────────────────
+    async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text || isBusy) return;
+
+        appendMessage(text, 'user');
+        inputEl.value = '';
+        setBusy(true);
+        showTyping();
+
+        try {
+            // Ensure session is initialised (idempotent — only runs once)
+            if (!isInitialized) {
+                await initSession();
+            }
+
+            const reply = await callAgent(text);
+            hideTyping();
+            appendMessage(reply, 'bot');
+        } catch (err) {
+            hideTyping();
+            const msg = err.message || '';
+            if (msg === 'busy') {
+                appendMessage('⏳ Still processing your last message — please wait a moment.', 'bot', true);
+            } else if (msg === 'timeout') {
+                appendMessage('⏱️ The agent took too long to respond. Please try again.', 'bot', true);
+            } else if (msg.startsWith('init_failed')) {
+                appendMessage('⚠️ Could not connect to the agent. Please refresh the page.', 'bot', true);
+                isInitialized = false; // allow retry next time
+            } else {
+                appendMessage('⚠️ Something went wrong. Please try again.', 'bot', true);
+            }
+        } finally {
+            setBusy(false);
+            inputEl.focus();
+        }
+    }
+
+    // ── 11. Open / close ─────────────────────────────────────────────────────
     function openChat() {
         chatWindow.classList.remove('chat-hidden');
         inputEl.focus();
@@ -374,7 +500,7 @@
         chatWindow.classList.add('chat-hidden');
     }
 
-    // 12. Event listeners
+    // ── 12. Event listeners ──────────────────────────────────────────────────
     launcher.addEventListener('click', function () {
         if (chatWindow.classList.contains('chat-hidden')) {
             openChat();
@@ -384,7 +510,6 @@
     });
 
     closeBtn.addEventListener('click', closeChat);
-
     sendBtn.addEventListener('click', sendMessage);
 
     inputEl.addEventListener('keydown', function (e) {
@@ -394,14 +519,25 @@
         }
     });
 
-    // 13. Show a welcome message when the window first opens
+    // ── 13. Welcome message + background session init on first open ──────────
     let welcomed = false;
     launcher.addEventListener('click', function () {
         if (!welcomed && !chatWindow.classList.contains('chat-hidden')) {
             welcomed = true;
+
+            // Show greeting immediately
             setTimeout(function () {
                 appendMessage("Hello! 👋 How can I help you today?", 'bot');
             }, 300);
+
+            // Initialise the backend session silently in the background
+            // so it's ready when the user sends their first message.
+            if (!isInitialized) {
+                initSession().catch(function () {
+                    // If init fails here it will be retried / reported when
+                    // the user actually sends their first message.
+                });
+            }
         }
     });
 
