@@ -414,7 +414,7 @@
                 },
                 body: JSON.stringify({
                     user_query: userQuery,
-                    timeout_seconds: 60
+                    timeout_seconds: 300
                 })
             });
         }
