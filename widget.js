@@ -3,25 +3,26 @@
     if (document.getElementById('chat-widget-launcher')) return;
 
     // ── 2. Configuration ────────────────────────────────────────────────────
-    const API_BASE   = 'https://custivox-agent-512321808055.asia-south1.run.app';
-    // Unique channel per page-load session (persisted in sessionStorage so
-    // a page refresh starts fresh; change to localStorage if you want to
-    // resume across refreshes).
+    const API_BASE = 'https://custivox-agent-512321808055.asia-south1.run.app';
+
+    // Persistent channel ID across page refreshes (localStorage as recommended
+    // by the API docs so the user's session survives navigation).
     const CHANNEL_ID = (function () {
         const key = 'chat_widget_channel_id';
-        let id = sessionStorage.getItem(key);
+        let id = localStorage.getItem(key);
         if (!id) {
-            id = 'widget-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
-            sessionStorage.setItem(key, id);
+            id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                ? crypto.randomUUID()
+                : 'widget-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
+            localStorage.setItem(key, id);
         }
         return id;
     })();
 
-    // ── 3. Session state (all scoped, no globals) ────────────────────────────
-    let accessToken   = null;
-    let refreshToken  = null;
-    let isInitialized = false;
-    let isBusy        = false;   // blocks send while agent is processing
+    // ── 3. Session state ─────────────────────────────────────────────────────
+    let selectedLanguage = null;   // 'hindi' | 'gujarati'
+    let isInitialized    = false;  // true after /select_language succeeds
+    let isBusy           = false;  // blocks send while agent is processing
 
     // ── 4. Inject scoped CSS ─────────────────────────────────────────────────
     const style = document.createElement('style');
@@ -60,7 +61,7 @@
             bottom: 92px;
             right: 24px;
             width: 340px;
-            height: 480px;
+            height: 500px;
             background: #ffffff;
             border-radius: 16px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.18);
@@ -133,9 +134,7 @@
             border-radius: 6px;
             transition: background 0.15s;
         }
-        #chat-widget-close:hover {
-            background: rgba(255,255,255,0.2);
-        }
+        #chat-widget-close:hover { background: rgba(255,255,255,0.2); }
         #chat-widget-close svg {
             width: 18px;
             height: 18px;
@@ -144,6 +143,79 @@
             stroke-width: 2.5;
             stroke-linecap: round;
         }
+
+        /* ── Language Picker Screen ── */
+        #chat-widget-lang-screen {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 24px;
+            background: #f9fafb;
+        }
+        #chat-widget-lang-screen.chat-hidden { display: none; }
+        #chat-widget-lang-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #111827;
+            text-align: center;
+        }
+        #chat-widget-lang-subtitle {
+            font-size: 13px;
+            color: #6b7280;
+            text-align: center;
+            line-height: 1.5;
+        }
+        #chat-widget-lang-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 100%;
+        }
+        .chat-lang-btn {
+            width: 100%;
+            padding: 14px 18px;
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            background: #ffffff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+            text-align: left;
+        }
+        .chat-lang-btn:hover {
+            border-color: #3b82f6;
+            background: #eff6ff;
+            box-shadow: 0 2px 8px rgba(59,130,246,0.12);
+        }
+        .chat-lang-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .chat-lang-flag {
+            font-size: 26px;
+            flex-shrink: 0;
+        }
+        .chat-lang-info-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #111827;
+        }
+        .chat-lang-info-hint {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+        #chat-widget-lang-loading {
+            font-size: 13px;
+            color: #6b7280;
+            display: none;
+        }
+        #chat-widget-lang-loading.chat-visible { display: block; }
 
         /* ── Messages Area ── */
         #chat-widget-messages {
@@ -155,6 +227,7 @@
             gap: 10px;
             background: #f9fafb;
         }
+        #chat-widget-messages.chat-hidden { display: none; }
         #chat-widget-messages::-webkit-scrollbar { width: 4px; }
         #chat-widget-messages::-webkit-scrollbar-track { background: transparent; }
         #chat-widget-messages::-webkit-scrollbar-thumb {
@@ -170,11 +243,11 @@
         }
         .chat-msg-row.user { flex-direction: row-reverse; }
         .chat-bubble {
-            max-width: 75%;
+            max-width: 78%;
             padding: 10px 14px;
             border-radius: 18px;
             font-size: 14px;
-            line-height: 1.45;
+            line-height: 1.55;
             word-wrap: break-word;
             white-space: pre-wrap;
         }
@@ -227,6 +300,7 @@
             background: #ffffff;
             flex-shrink: 0;
         }
+        #chat-widget-input-row.chat-hidden { display: none; }
         #chat-widget-input {
             flex: 1;
             padding: 10px 14px;
@@ -263,6 +337,27 @@
             height: 18px;
             fill: #ffffff;
         }
+
+        /* ── Change Language link ── */
+        #chat-widget-change-lang {
+            padding: 6px 16px 8px;
+            background: #ffffff;
+            border-top: 1px solid #f3f4f6;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        #chat-widget-change-lang.chat-hidden { display: none; }
+        #chat-widget-change-lang button {
+            background: none;
+            border: none;
+            color: #6b7280;
+            font-size: 11px;
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 4px;
+            transition: color 0.15s;
+        }
+        #chat-widget-change-lang button:hover { color: #3b82f6; }
     `;
     document.head.appendChild(style);
 
@@ -281,6 +376,7 @@
     chatWindow.id = 'chat-widget-window';
     chatWindow.classList.add('chat-hidden');
     chatWindow.innerHTML = `
+        <!-- Header -->
         <div id="chat-widget-header">
             <div id="chat-widget-header-info">
                 <div id="chat-widget-avatar">
@@ -295,7 +391,7 @@
                 </div>
                 <div>
                     <div id="chat-widget-title">Chat Assistant</div>
-                    <div id="chat-widget-subtitle">Ask me anything</div>
+                    <div id="chat-widget-subtitle">Chat in Hindi or Gujarati</div>
                 </div>
             </div>
             <button id="chat-widget-close" aria-label="Close chat">
@@ -305,9 +401,46 @@
                 </svg>
             </button>
         </div>
-        <div id="chat-widget-messages"></div>
-        <div id="chat-widget-input-row">
-            <input id="chat-widget-input" type="text" placeholder="Type a message…" autocomplete="off"/>
+
+        <!-- Language Picker Screen -->
+        <div id="chat-widget-lang-screen">
+            <div id="chat-widget-lang-title">Select your language</div>
+            <div id="chat-widget-lang-subtitle">
+                Type in romanized Hindi or Gujarati<br>
+                and get replies in native script.
+            </div>
+            <div id="chat-widget-lang-buttons">
+                <button class="chat-lang-btn" data-lang="hindi">
+                    <span class="chat-lang-flag">🇮🇳</span>
+                    <div>
+                        <div class="chat-lang-info-title">Hindi</div>
+                        <div class="chat-lang-info-hint">e.g. "mujhe shoes chahiye"</div>
+                    </div>
+                </button>
+                <button class="chat-lang-btn" data-lang="gujarati">
+                    <span class="chat-lang-flag">🇮🇳</span>
+                    <div>
+                        <div class="chat-lang-info-title">Gujarati</div>
+                        <div class="chat-lang-info-hint">e.g. "mane shoes joiye"</div>
+                    </div>
+                </button>
+            </div>
+            <div id="chat-widget-lang-loading">Connecting… please wait ⏳</div>
+        </div>
+
+        <!-- Messages Area (hidden until language is selected) -->
+        <div id="chat-widget-messages" class="chat-hidden"></div>
+
+        <!-- Change Language link (hidden until language is selected) -->
+        <div id="chat-widget-change-lang" class="chat-hidden">
+            <button id="chat-widget-change-lang-btn">🔄 Change language</button>
+        </div>
+
+        <!-- Input Row (hidden until language is selected) -->
+        <div id="chat-widget-input-row" class="chat-hidden">
+            <input id="chat-widget-input" type="text"
+                   placeholder="Type in romanized Hindi or Gujarati…"
+                   autocomplete="off"/>
             <button id="chat-widget-send" aria-label="Send message">
                 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                     <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -318,10 +451,16 @@
     document.body.appendChild(chatWindow);
 
     // ── 7. Grab element references ───────────────────────────────────────────
-    const messagesEl = chatWindow.querySelector('#chat-widget-messages');
-    const inputEl    = chatWindow.querySelector('#chat-widget-input');
-    const sendBtn    = chatWindow.querySelector('#chat-widget-send');
-    const closeBtn   = chatWindow.querySelector('#chat-widget-close');
+    const langScreen     = chatWindow.querySelector('#chat-widget-lang-screen');
+    const langLoading    = chatWindow.querySelector('#chat-widget-lang-loading');
+    const langButtons    = chatWindow.querySelectorAll('.chat-lang-btn');
+    const messagesEl     = chatWindow.querySelector('#chat-widget-messages');
+    const inputRow       = chatWindow.querySelector('#chat-widget-input-row');
+    const changeLangBar  = chatWindow.querySelector('#chat-widget-change-lang');
+    const changeLangBtn  = chatWindow.querySelector('#chat-widget-change-lang-btn');
+    const inputEl        = chatWindow.querySelector('#chat-widget-input');
+    const sendBtn        = chatWindow.querySelector('#chat-widget-send');
+    const closeBtn       = chatWindow.querySelector('#chat-widget-close');
 
     // ── 8. UI helpers ────────────────────────────────────────────────────────
     function scrollToBottom() {
@@ -361,99 +500,124 @@
         inputEl.disabled = busy;
     }
 
-    // ── 9. API helpers ───────────────────────────────────────────────────────
+    /** Show the language picker; hide chat UI */
+    function showLangScreen() {
+        langScreen.classList.remove('chat-hidden');
+        messagesEl.classList.add('chat-hidden');
+        inputRow.classList.add('chat-hidden');
+        changeLangBar.classList.add('chat-hidden');
+        langLoading.classList.remove('chat-visible');
+        langButtons.forEach(function (b) { b.disabled = false; });
+        isInitialized = false;
+        selectedLanguage = null;
+    }
+
+    /** Show the chat UI; hide language picker */
+    function showChatScreen() {
+        langScreen.classList.add('chat-hidden');
+        messagesEl.classList.remove('chat-hidden');
+        inputRow.classList.remove('chat-hidden');
+        changeLangBar.classList.remove('chat-hidden');
+        inputEl.focus();
+    }
+
+    // ── 9. API calls ─────────────────────────────────────────────────────────
 
     /**
-     * POST /initialize — creates / resumes a session for this channel_id.
-     * Stores access_token and refresh_token in memory.
+     * POST /select_language — initialises the session for this channel+language.
+     * The Translation API handles JWT tokens internally; we don't touch them.
      */
-    async function initSession() {
-        const res = await fetch(API_BASE + '/initialize', {
+    async function selectLanguage(language) {
+        const res = await fetch(API_BASE + '/select_language', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 channel_id: CHANNEL_ID,
-                stream_format: 'ndjson'
+                language: language
             })
         });
-        if (!res.ok) throw new Error('init_failed:' + res.status);
+        if (!res.ok) {
+            const status = res.status;
+            if (status === 422) throw new Error('invalid_language');
+            if (status === 502) throw new Error('backend_unreachable');
+            throw new Error('select_lang_error:' + status);
+        }
         const data = await res.json();
-        accessToken  = data.access_token;
-        refreshToken = data.refresh_token;
+        if (data.status !== 'ok') throw new Error('select_lang_not_ok');
+        selectedLanguage = language;
         isInitialized = true;
     }
 
     /**
-     * POST /refresh_token — silently refreshes a near-expired access token.
+     * POST /chat — sends the user message and returns the native-script reply.
+     * On 401 the Translation API session has expired → re-initialise and retry.
      */
-    async function refreshAccessToken() {
-        const res = await fetch(API_BASE + '/refresh_token', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + refreshToken
-            }
-        });
-        if (!res.ok) throw new Error('refresh_failed:' + res.status);
-        const data = await res.json();
-        accessToken  = data.access_token;
-        refreshToken = data.refresh_token;
-    }
-
-    /**
-     * POST /invoke_agent — sends the user query and returns the agent's text.
-     * Automatically retries once after refreshing the token on a 401.
-     */
-    async function callAgent(userQuery) {
+    async function callAgent(message) {
         async function doRequest() {
-            return fetch(API_BASE + '/invoke_agent', {
+            return fetch(API_BASE + '/chat', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + accessToken
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    user_query: userQuery,
-                    timeout_seconds: 300
+                    channel_id: CHANNEL_ID,
+                    message: message
                 })
             });
         }
 
         let res = await doRequest();
 
-        // ── Token expired → refresh once and retry ──
+        // ── FastWorkflow JWT expired inside the Translation API → re-init ──
         if (res.status === 401) {
-            await refreshAccessToken();
+            await selectLanguage(selectedLanguage);
             res = await doRequest();
         }
 
-        // ── Still failing after refresh ──
         if (!res.ok) {
-            if (res.status === 409) {
-                throw new Error('busy');
-            } else if (res.status === 504) {
-                throw new Error('timeout');
-            } else {
-                throw new Error('agent_error:' + res.status);
-            }
+            if (res.status === 404) throw new Error('session_not_found');
+            if (res.status === 500) throw new Error('translation_failed');
+            if (res.status === 502) throw new Error('backend_unreachable');
+            throw new Error('chat_error:' + res.status);
         }
 
         const data = await res.json();
-
-        // Extract the agent's text from command_responses[0].response
-        if (
-            data.command_responses &&
-            data.command_responses.length > 0 &&
-            data.command_responses[0].response
-        ) {
-            return data.command_responses[0].response;
-        }
-
-        // Fallback if structure is unexpected
-        return 'I received your message but could not parse the response.';
+        return data.response || 'I received your message but could not parse the response.';
     }
 
-    // ── 10. Send message flow ────────────────────────────────────────────────
+    // ── 10. Language selection handler ───────────────────────────────────────
+    async function handleLanguageSelect(language) {
+        langButtons.forEach(function (b) { b.disabled = true; });
+        langLoading.classList.add('chat-visible');
+
+        try {
+            await selectLanguage(language);
+
+            // Transition to chat
+            showChatScreen();
+
+            const langLabel = language === 'hindi' ? 'Hindi 🇮🇳' : 'Gujarati 🇮🇳';
+            appendMessage(
+                'Hello! 👋 Language set to ' + langLabel + '.\nType your message in romanized ' +
+                (language === 'hindi' ? 'Hindi (e.g. "mujhe help chahiye").' : 'Gujarati (e.g. "mane madad joiye").'),
+                'bot'
+            );
+        } catch (err) {
+            langLoading.classList.remove('chat-visible');
+            langButtons.forEach(function (b) { b.disabled = false; });
+            const msg = err.message || '';
+            if (msg === 'backend_unreachable') {
+                // Show error inside the lang screen itself
+                langLoading.textContent = '⚠️ Could not reach the agent. Please try again.';
+                langLoading.style.color = '#b91c1c';
+                langLoading.classList.add('chat-visible');
+            } else {
+                langLoading.textContent = '⚠️ Something went wrong. Please try again.';
+                langLoading.style.color = '#b91c1c';
+                langLoading.classList.add('chat-visible');
+            }
+        }
+    }
+
+    // ── 11. Send message flow ────────────────────────────────────────────────
     async function sendMessage() {
         const text = inputEl.value.trim();
         if (!text || isBusy) return;
@@ -464,24 +628,19 @@
         showTyping();
 
         try {
-            // Ensure session is initialised (idempotent — only runs once)
-            if (!isInitialized) {
-                await initSession();
-            }
-
             const reply = await callAgent(text);
             hideTyping();
             appendMessage(reply, 'bot');
         } catch (err) {
             hideTyping();
             const msg = err.message || '';
-            if (msg === 'busy') {
-                appendMessage('⏳ Still processing your last message — please wait a moment.', 'bot', true);
-            } else if (msg === 'timeout') {
-                appendMessage('⏱️ The agent took too long to respond. Please try again.', 'bot', true);
-            } else if (msg.startsWith('init_failed')) {
-                appendMessage('⚠️ Could not connect to the agent. Please refresh the page.', 'bot', true);
-                isInitialized = false; // allow retry next time
+            if (msg === 'session_not_found') {
+                appendMessage('⚠️ Session expired. Please select your language again.', 'bot', true);
+                showLangScreen();
+            } else if (msg === 'translation_failed') {
+                appendMessage('⚠️ Translation failed. Please rephrase your message and try again.', 'bot', true);
+            } else if (msg === 'backend_unreachable') {
+                appendMessage('⚠️ The agent is unreachable right now. Please try again later.', 'bot', true);
             } else {
                 appendMessage('⚠️ Something went wrong. Please try again.', 'bot', true);
             }
@@ -491,16 +650,25 @@
         }
     }
 
-    // ── 11. Open / close ─────────────────────────────────────────────────────
+    // ── 12. Open / close ─────────────────────────────────────────────────────
     function openChat() {
         chatWindow.classList.remove('chat-hidden');
-        inputEl.focus();
+        if (!isInitialized) {
+            // Reset lang screen state cleanly on open
+            langLoading.classList.remove('chat-visible');
+            langLoading.style.color = '#6b7280';
+            langLoading.textContent = 'Connecting… please wait ⏳';
+            langButtons.forEach(function (b) { b.disabled = false; });
+        } else {
+            inputEl.focus();
+        }
     }
+
     function closeChat() {
         chatWindow.classList.add('chat-hidden');
     }
 
-    // ── 12. Event listeners ──────────────────────────────────────────────────
+    // ── 13. Event listeners ──────────────────────────────────────────────────
     launcher.addEventListener('click', function () {
         if (chatWindow.classList.contains('chat-hidden')) {
             openChat();
@@ -519,26 +687,17 @@
         }
     });
 
-    // ── 13. Welcome message + background session init on first open ──────────
-    let welcomed = false;
-    launcher.addEventListener('click', function () {
-        if (!welcomed && !chatWindow.classList.contains('chat-hidden')) {
-            welcomed = true;
+    // Language buttons
+    langButtons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            handleLanguageSelect(btn.getAttribute('data-lang'));
+        });
+    });
 
-            // Show greeting immediately
-            setTimeout(function () {
-                appendMessage("Hello! 👋 How can I help you today?", 'bot');
-            }, 300);
-
-            // Initialise the backend session silently in the background
-            // so it's ready when the user sends their first message.
-            if (!isInitialized) {
-                initSession().catch(function () {
-                    // If init fails here it will be retried / reported when
-                    // the user actually sends their first message.
-                });
-            }
-        }
+    // "Change language" link — wipe messages and return to picker
+    changeLangBtn.addEventListener('click', function () {
+        messagesEl.innerHTML = '';
+        showLangScreen();
     });
 
 })();
