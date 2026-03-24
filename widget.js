@@ -3,7 +3,7 @@
     if (document.getElementById('chat-widget-launcher')) return;
 
     // ── 2. Configuration ────────────────────────────────────────────────────
-    const API_BASE = 'https://custivox-agent-512321808055.asia-south1.run.app';
+    const API_BASE = 'https://custivox-agent-374292197208.asia-southeast1.run.app';
 
     // Persistent channel ID across page refreshes (localStorage as recommended
     // by the API docs so the user's session survives navigation).
